@@ -2,27 +2,125 @@ def concurrency
   :shared
 end
 
+require 'date'
+require 'faraday'
+require 'fuzzystringmatch'
+require 'ipaddr'
+require 'json'
+require 'lru_reredux'
+require 'psych'
+require 'uri'
+require 'stringex_lite'
+
+##############################################################################################
+# Despite the warning against globla variables, we are using them here in order to make sure that
+#   we don't have duplicate caches for things cross different clones of the filter,
+#   which is what happens if you just use @instance_variables. However, we should
+#   be safe because 1) we are using Concurrent::Hash to maintain these per-type caches, and
+#   2) because the caches themselves are threadsafe. Note that this will share these values
+#   across filters and pipelines, though, as far as I understand it.
+# See "Avoiding Concurrency Issues"
+#   https://www.elastic.co/guide/en/logstash/current/plugins-filters-ruby.html#plugins-filters-ruby-concurrency
+# Note that these calls are intended to be used during the "register" method.
+
+$global_caches_hash = Concurrent::Hash.new
+$global_ttl_caches_hash = Concurrent::Hash.new
+
+def get_register_cache(
+  cache_type,
+  cache_size,
+  getset_ignores_nil
+)
+  $global_caches_hash[cache_type] ||= LruReredux::ThreadSafeCache.new(cache_size, getset_ignores_nil)
+end
+
+def get_register_ttl_cache(
+  cache_type,
+  cache_size,
+  cache_ttl,
+  getset_ignores_nil
+)
+  $global_ttl_caches_hash[cache_type] ||= LruRedux::TTL::ThreadSafeCache.new(cache_size, cache_ttl, getset_ignores_nil)
+end
+
+##############################################################################################
+# These global variables are used for generating performance profiling stats for
+#   NetBox API calls and are not used by default
+$method_timings_logging_thread_started = Concurrent::AtomicFixnum.new(0)
+$method_timings = Concurrent::Hash.new { |h, k| h[k] = Concurrent::Array.new }
+$method_timings_logging_thread = nil
+$method_timings_logging_thread_running = false
+
+$private_ip_subnets = {
+  IPAddr.new("10.0.0.0/8")      => { network: IPAddr.new("10.0.0.0"), broadcast: IPAddr.new("10.255.255.255") },
+  IPAddr.new("172.16.0.0/12")   => { network: IPAddr.new("172.16.0.0"), broadcast: IPAddr.new("172.31.255.255") },
+  IPAddr.new("192.168.0.0/16")  => { network: IPAddr.new("192.168.0.0"), broadcast: IPAddr.new("192.168.255.255") },
+  IPAddr.new("fc00::/7")        => { network: IPAddr.new("fc00::"), broadcast: IPAddr.new("fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff") }
+}.freeze
+
+##############################################################################################
+class NetBoxConnLazy
+  def initialize(
+    url,
+    token,
+    debug
+  )
+    @object = nil
+    @url = url
+    @token = token
+    @netboxConnDebug = debug
+    @connected = false
+  end
+
+  def method_missing(method, *args, &block)
+
+    puts "#{method}(#{args.map(&:inspect).join(', ')})" if @netboxConnDebug
+
+    if $method_timings_logging_thread_running
+      key = "#{method} #{args[0]}"
+      key = key.to_sym
+      start_time = Time.now
+    end
+
+    initialize_object unless @object
+    result = @object.send(method, *args, &block)
+
+    if $method_timings_logging_thread_running
+      duration = (Time.now - start_time) * 1000
+      $method_timings[key] << duration
+    end
+
+    @connected ||= !result.nil?
+    result
+  end
+
+  def initialized?
+    !@object.nil? && @connected
+  end
+
+  private
+
+  def initialize_object
+    @object = Faraday.new(@url) do |conn|
+      conn.request :authorization, 'Token', @token
+      conn.request :url_encoded
+      conn.response :json, :parser_options => { :symbolize_names => true }
+    end
+    @connected = false
+  end
+end
+
+##############################################################################################
 def register(
   params
 )
-
-  require 'date'
-  require 'faraday'
-  require 'fuzzystringmatch'
-  require 'ipaddr'
-  require 'json'
-  require 'lru_reredux'
-  require 'psych'
-  require 'stringex_lite'
-
   # enable/disable based on script parameters and global environment variable
   _enabled_str = params["enabled"]
   _enabled_env = params["enabled_env"]
   if _enabled_str.nil? && !_enabled_env.nil?
     _enabled_str = ENV[_enabled_env]
   end
-  @netbox_enabled = [1, true, '1', 'true', 't', 'on', 'enabled'].include?(_enabled_str.to_s.downcase) &&
-                    (not [1, true, '1', 'true', 't', 'on', 'enabled'].include?(ENV["NETBOX_DISABLED"].to_s.downcase))
+  @netbox_enabled = [1, true, '1', 'true', 't', 'on', 'enabled'].include?(_enabled_str.to_s.downcase)
 
   # source field containing lookup value
   @source = params["source"]
@@ -58,9 +156,9 @@ def register(
   @lookup_service_port_source = params.fetch("lookup_service_port_source", "[destination][port]")
 
   # API parameters
-  @page_size = params.fetch("page_size", 50)
+  @page_size = params.fetch("page_size", 1000)
 
-  # caching parameters (default cache size = 1000, default cache TTL = 30 seconds)
+  # caching parameters (default cache size = 10000, default cache TTL = 300 seconds)
   _cache_size_val = params["cache_size"]
   _cache_size_env = params["cache_size_env"]
   if (!_cache_size_val.is_a?(Integer) || _cache_size_val <= 0) && !_cache_size_env.nil?
@@ -69,7 +167,7 @@ def register(
   if _cache_size_val.is_a?(Integer) && (_cache_size_val > 0)
     @cache_size = _cache_size_val
   else
-    @cache_size = 1000
+    @cache_size = 10000
   end
   _cache_ttl_val = params["cache_ttl"]
   _cache_ttl_env = params["cache_ttl_env"]
@@ -79,11 +177,21 @@ def register(
   if _cache_ttl_val.is_a?(Integer) && (_cache_ttl_val > 0)
     @cache_ttl = _cache_ttl_val
   else
-    @cache_ttl = 30
+    @cache_ttl = 300
   end
 
   # target field to store looked-up value
   @target = params["target"]
+
+  # for tagging events that go all the way through the filter
+  @add_tag = params["add_tag"]
+  _add_tag_env = params["add_tag_env"]
+  if @add_tag.nil? && !_add_tag_env.nil?
+    @add_tag = ENV[_add_tag_env]
+  end
+  if !@add_tag.nil? && @add_tag.empty?
+    @add_tag = nil
+  end
 
   # verbose - either specified directly or read from ENV via verbose_env
   #   false - store the "name" (fallback to "display") and "id" value(s) as @target.name and @target.id
@@ -92,7 +200,6 @@ def register(
   #   true - store a hash of arrays *under* @target
   #             e.g., (@target is destination.segment) destination.segment.name => ["foobar"]
   #                                                    destination.segment.id => [123]
-  #                                                    destination.segment.url => ["whatever"]
   #                                                    destination.segment.foo => ["bar"]
   #                                                    etc.
   _verbose_str = params["verbose"]
@@ -110,21 +217,43 @@ def register(
   @debug_verbose = ['verbose', 'v', 'extra'].include?(_debug_str.to_s.downcase)
   @debug = (@debug_verbose || [1, true, '1', 'true', 't', 'on', 'enabled'].include?(_debug_str.to_s.downcase))
 
+  _debug_timings_str = params["debug_timings"]
+  _debug_timings_env = params["debug_timings_env"]
+  if _debug_timings_str.nil? && !_debug_timings_env.nil?
+    _debug_timings_str = ENV[_debug_timings_env]
+  end
+  @debug_timings = [1, true, '1', 'true', 't', 'on', 'enabled'].include?(_debug_timings_str.to_s.downcase)
+
   # connection URL for netbox
-  @netbox_url = params.fetch("netbox_url", "http://netbox:8080/netbox/api").delete_suffix("/")
-  @netbox_url_suffix = "/netbox/api"
-  @netbox_url_base = @netbox_url.delete_suffix(@netbox_url_suffix)
+  # url, e.g., "https://netbox.example.org" or "http://netbox:8080"
+  _netbox_url_str = params["netbox_url"].to_s.delete_suffix("/")
+  _netbox_url_env = params["netbox_url_env"].to_s
+  if _netbox_url_str.empty? && !_netbox_url_env.empty?
+    _netbox_url_str = ENV[_netbox_url_env].to_s.delete_suffix("/")
+  end
+  if _netbox_url_str.empty?
+    _netbox_url_str = "http://netbox:8080/netbox/api"
+  end
+  _netbox_url_obj = URI.parse(_netbox_url_str.end_with?('/api') ? _netbox_url_str : "#{_netbox_url_str}/api")
+  @netbox_url = (_netbox_url_obj.port == _netbox_url_obj.default_port) ?
+                  "#{_netbox_url_obj.scheme}://#{_netbox_url_obj.host}#{_netbox_url_obj.path}" :
+                  "#{_netbox_url_obj.scheme}://#{_netbox_url_obj.host}:#{_netbox_url_obj.port}#{_netbox_url_obj.path}"
+  @netbox_url_base = (_netbox_url_obj.port == _netbox_url_obj.default_port) ?
+                       "#{_netbox_url_obj.scheme}://#{_netbox_url_obj.host}" :
+                       "#{_netbox_url_obj.scheme}://#{_netbox_url_obj.host}:#{_netbox_url_obj.port}"
+  @netbox_uri_suffix = _netbox_url_obj.path
 
   # connection token (either specified directly or read from ENV via netbox_token_env)
   @netbox_token = params["netbox_token"]
   _netbox_token_env = params["netbox_token_env"]
   if @netbox_token.nil? && !_netbox_token_env.nil?
-    @netbox_token = ENV[_netbox_token_env]
+    # could be something like "NETBOX_TOKEN;SUPERUSER_API_TOKEN", take first variable that evaluates
+    @netbox_token = _netbox_token_env.split(/[;,:\s]+/).map { |env| ENV[env].to_s }.find { |val| val && !val.strip.empty? }
   end
 
   # hash of hashes, where key = site ID and value = hash of lookup types (from @lookup_type),
   #   each of which contains the respective looked-up values
-  @site_lookup_types_hash = LruReredux::ThreadSafeCache.new(128, true)
+  @site_lookup_types_hash = get_register_cache(:site_lookup_types_hash, 256, true)
   @lookup_cache_size = params.fetch("lookup_cache_size", 512)
 
   # these are used for autopopulation only, not lookup/enrichment
@@ -231,16 +360,16 @@ def register(
   @autopopulate_create_prefix = [1, true, '1', 'true', 't', 'on', 'enabled'].include?(_autopopulate_create_prefix_str.to_s.downcase)
 
   # case-insensitive hash of OUIs (https://standards-oui.ieee.org/) to Manufacturers (https://demo.netbox.dev/static/docs/core-functionality/device-types/)
-  @manuf_hash = LruReredux::TTL::ThreadSafeCache.new(params.fetch("manuf_cache_size", 2048), @cache_ttl, true)
+  @manuf_hash = get_register_ttl_cache(:manuf_hash, params.fetch("manuf_cache_size", 4096), @cache_ttl, true)
 
   # case-insensitive hash of role names to IDs
-  @role_hash = LruReredux::TTL::ThreadSafeCache.new(params.fetch("role_cache_size", 256), @cache_ttl, true)
+  @role_hash = get_register_ttl_cache(:role_hash, params.fetch("role_cache_size", 512), @cache_ttl, true)
 
   # case-insensitive hash of site names to site IDs
-  @site_name_hash = LruReredux::TTL::ThreadSafeCache.new(params.fetch("site_cache_size", 128), @cache_ttl, true)
+  @site_name_hash = get_register_ttl_cache(:site_name_hash, params.fetch("site_cache_size", 256), @cache_ttl, true)
 
   # hash of site IDs to site objects
-  @site_id_hash = LruReredux::TTL::ThreadSafeCache.new(params.fetch("site_cache_size", 128), @cache_ttl, true)
+  @site_id_hash = get_register_ttl_cache(:site_id_hash, params.fetch("site_cache_size", 256), @cache_ttl, true)
 
   # end of autopopulation arguments
 
@@ -265,12 +394,6 @@ def register(
                               /\bsr[ol]s?\b/,
                               /\btech(nolog(y|ie|iya)s?)?\b/ ].freeze
 
-  @private_ip_subnets = [
-    IPAddr.new('10.0.0.0/8'),
-    IPAddr.new('172.16.0.0/12'),
-    IPAddr.new('192.168.0.0/16'),
-  ].freeze
-
   @nb_headers = { 'Content-Type': 'application/json' }.freeze
 
   @device_tag_autopopulated = { 'slug': 'malcolm-autopopulated' }.freeze
@@ -284,8 +407,73 @@ def register(
 
   @virtual_machine_device_type_name = "Virtual Machine".freeze
 
+  if @debug_timings && ($method_timings_logging_thread_started.value == 0) && $method_timings_logging_thread_started.compare_and_set(0, 1)
+     $method_timings = Concurrent::Hash.new { |h, k| h[k] = Concurrent::Array.new }
+     $method_timings_logging_thread = Thread.new { log_method_timings_thread_proc }
+     $method_timings_logging_thread_running = true
+   end
+
+  # make sure required tags exist before starting up
+  _tmp_nb_conn = NetBoxConnLazy.new(@netbox_url, @netbox_token, @debug_verbose)
+  [
+    [{ 'name' => 'Autopopulated', 'slug' => 'malcolm-autopopulated', 'color' => 'add8e6' }],
+    [{ 'name' => 'Manufacturer Unknown', 'slug' => 'manufacturer-unknown', 'color' => 'd3d3d3' }],
+    [{ 'name' => 'Hostname Unknown', 'slug' => 'hostname-unknown', 'color' => 'd3d3d3'}]
+  ].each do |item|
+    begin
+      _tmp_response = _tmp_nb_conn.post('extras/tags/', item.to_json, @nb_headers)
+    rescue Faraday::Error => e
+      # Do nothing (ignore errors)
+    end
+  end
 end
 
+##############################################################################################
+def log_method_timings_thread_proc
+  while $method_timings_logging_thread_running
+    sleep 60
+    puts "Method Execution Timings ---------------- :"
+    $method_timings.each do |method, times|
+      total_time = times.empty? ? 0 : times.sum
+      avg_time = times.empty? ? 0 : total_time / times.size
+      puts "#{method}: total #{total_time.round(2)} ms, avg #{avg_time.round(2)} ms over #{times.size} calls"
+    end
+  end
+end
+
+##############################################################################################
+def getset_with_tracking(cache, key)
+  cache_hit = true
+  result = cache.getset(key) do
+    cache_hit = false
+    yield
+  end
+  { result: result, cache_hit: cache_hit }
+end
+
+##############################################################################################
+def assignable_private_ip?(ip)
+  ipaddr = if ip.is_a?(IPAddr)
+             ip
+           else
+             begin
+               IPAddr.new(ip)
+             rescue
+               nil
+             end
+           end
+  return false if ipaddr.nil?
+
+  $private_ip_subnets.find do |subnet, addresses|
+    if subnet.include?(ipaddr)
+      return ipaddr != addresses[:network] && ipaddr != addresses[:broadcast]
+    end
+  end
+
+  false
+end
+
+##############################################################################################
 def filter(
   event
 )
@@ -315,6 +503,8 @@ def filter(
   end
 
   _result_set = false
+  _discovered_flag = false
+  _netbox_queried = false
 
   # _key might be an array of IP addresses, but we're only going to set the first _result into @target.
   #    this is still useful, though as autopopulation may happen for multiple IPs even if we only
@@ -324,11 +514,32 @@ def filter(
     _newKey.push(_key) unless _key.nil?
     _key = _newKey
   end
+  # _private_ips stores IPAddr representations of IP strings for private IP addresses
+  _private_ips = Array.new
 
   _key.each do |ip_key|
 
-    _result = _lookup_hash.getset(ip_key){ netbox_lookup(:event=>event, :ip_key=>ip_key, :site_id=>_lookup_site_id) }.dup
+    _lookup_tracking_result = getset_with_tracking(_lookup_hash, ip_key) do
+      netbox_lookup(event: event, ip_key: ip_key, site_id: _lookup_site_id)
+    end
+    if _lookup_tracking_result[:result]
+      _result, _key_ip, _nb_queried = _lookup_tracking_result[:result].dup
+    else
+      _result, _key_ip, _nb_queried = nil, nil, false
+    end
+    _private_ips.push(_key_ip) if assignable_private_ip?(_key_ip)
+    _netbox_queried ||= _nb_queried unless _lookup_tracking_result[:cache_hit]
+
     if !_result.nil? && !_result.empty?
+
+      if _lookup_tracking_result[:cache_hit]
+        # it can't have been "discovered" if it was already in the cache
+        _result.delete(:discovered)
+      else
+        _result[:discovered] = _result[:discovered]&.any? if _result[:discovered].is_a?(Array)
+        _result.delete(:discovered) unless _result[:discovered]
+        _discovered_flag ||= _result.fetch(:discovered, false)
+      end
 
       puts('netbox_enrich.filter(%{lookup_type}: %{lookup_key} @ %{site}) success: %{result}' % {
             lookup_type: @lookup_type,
@@ -363,7 +574,7 @@ def filter(
           # the manufacturer-unknown tag is set, but we appear to have an OUI or MAC address
           #   from the event. we need to update the record in netbox (determine the manufacturer
           #   from this value and remove the tag) and in the result
-          _updated_result = netbox_lookup(:event=>event, :ip_key=>ip_key, :site_id=>_lookup_site_id, :previous_result=>_result)
+          _updated_result, _key_ip, _nb_queried = netbox_lookup(:event=>event, :ip_key=>ip_key, :site_id=>_lookup_site_id, :previous_result=>_result)
           puts('filter tried to patch %{name} (site %{site}) for "%{tags}" ("%{host}", "%{mac}", "%{oui}"): %{result}' % {
                 name: ip_key,
                 site: _lookup_site_id,
@@ -394,8 +605,34 @@ def filter(
       event.set("#{@target}", _result)
       _result_set = true
     end
-
   end # _key.each do |ip_key|
+
+  if (@lookup_type == :ip_device) &&
+     (_discovered_flag || (_netbox_queried && !_result_set)) &&
+     !_private_ips.empty? &&
+     !@target.nil? &&
+     !@target.empty?
+  then
+    # no result found, this device should be marked as "uninventoried"
+    _result = _result_set ? event.get("#{@target}") : Hash.new
+    if _result.is_a?(Hash)
+      _result[:uninventoried] = true
+      event.set("#{@target}", _result)
+    end
+  end
+
+  unless _private_ips.empty? || @add_tag.nil? || @add_tag.empty?
+    _tags = event.get('[tags]')
+    if !_tags.is_a?(Array) then
+      _newTags = Array.new
+      _newTags.push(_tags) unless _tags.nil? || _tags.empty?
+      _tags = _newTags
+    end
+    if !_tags.include? @add_tag
+      _tags.push(@add_tag)
+      event.set("[tags]", _tags)
+    end
+  end
 
   [event]
 end
@@ -466,7 +703,7 @@ def crush(
   elsif thing.is_a?(Hash)
     thing.each_with_object({}) do |(k,v), h|
       v = crush(v)
-      h[k] = v unless [nil, [], {}, "", "Unspecified", "unspecified"].include?(v)
+      h[k] = v unless ([nil, [], {}, "", "Unspecified", "unspecified"].include?(v) || (k == :url))
     end
   else
     thing
@@ -501,14 +738,6 @@ def shorten_string(
   end
 end
 
-def netbox_connection()
-  Faraday.new(@netbox_url) do |conn|
-    conn.request :authorization, 'Token', @netbox_token
-    conn.request :url_encoded
-    conn.response :json, :parser_options => { :symbolize_names => true }
-  end
-end
-
 def lookup_or_create_site(
   site_id,
   site_name,
@@ -527,7 +756,7 @@ def lookup_or_create_site(
         _site = nil
 
         # this shouldn't be too often, once the hash gets populated
-        _nb_to_use = netbox_connection() if _nb_to_use.nil?
+        _nb_to_use = NetBoxConnLazy.new(@netbox_url, @netbox_token, @debug_verbose) if _nb_to_use.nil?
 
         # look it up by ID
         _query = { :offset => 0,
@@ -539,12 +768,15 @@ def lookup_or_create_site(
            (_tmp_sites.length() > 0)
         then
            _site = _tmp_sites.first
+        elsif @debug
+          puts('lookup_or_create_site (%{id}): _sites_response: %{result}' % { id: _site_id_str, result: JSON.generate(_sites_response) })
         end
 
       rescue Faraday::Error => e
         # give up aka do nothing
         puts "lookup_or_create_site (#{_site_id_str}): #{e.message}" if @debug
       end
+
       _site
     }.dup
   end
@@ -558,7 +790,7 @@ def lookup_or_create_site(
         _site_id = 0
 
         # this shouldn't be too often, once the hash gets populated
-        _nb_to_use = netbox_connection() if _nb_to_use.nil?
+        _nb_to_use = NetBoxConnLazy.new(@netbox_url, @netbox_token, @debug_verbose) if _nb_to_use.nil?
 
         # try to look it up by name
         _query = { :offset => 0,
@@ -570,6 +802,8 @@ def lookup_or_create_site(
            (_tmp_sites.length() > 0)
         then
            _site = _tmp_sites.first
+        elsif @debug
+          puts('lookup_or_create_site (%{name}): _sites_response: %{result}' % { name: _site_name_key_str, result: JSON.generate(_sites_response) })
         end
 
         if _site.is_a?(Hash)
@@ -779,7 +1013,10 @@ def lookup_prefixes(
   _query = { :contains => ip_str,
              :offset => 0,
              :limit => @page_size }
-  _query[:site_id] = site_id if (site_id.is_a?(Integer) && (site_id > 0))
+  if (site_id.is_a?(Integer) && (site_id > 0))
+    _query[:scope_type] = "dcim.site"
+    _query[:scope_id] = site_id
+  end
   begin
     while true do
       if (_prefixes_response = nb.get('ipam/prefixes/', _query).body) &&
@@ -1003,6 +1240,7 @@ def autopopulate_devices(
            _device_create_response.has_key?(:id)
         then
            _autopopulate_device = _device_create_response
+           _autopopulate_device[:discovered] = true
         elsif @debug
           puts('autopopulate_devices (VM: %{name}, site: %{site}): _device_create_response: %{result}' % { name: _device_name, site: site_id, result: JSON.generate(_device_create_response) })
         end
@@ -1033,6 +1271,7 @@ def autopopulate_devices(
              _device_create_response.has_key?(:id)
           then
              _autopopulate_device = _device_create_response
+             _autopopulate_device[:discovered] = true
           elsif @debug
             puts('autopopulate_devices (device: %{name}, site: %{site}): _device_create_response: %{result}' % { name: _device_name, site: site_id, result: JSON.generate(_device_create_response) })
           end
@@ -1071,10 +1310,8 @@ def autopopulate_prefixes(
   _autopopulate_tags = [ @device_tag_autopopulated ]
 
   _prefix_data = nil
-  # TODO: IPv6?
-  _private_ip_subnet = @private_ip_subnets.find { |subnet| subnet.include?(ip_obj) }
-  if !_private_ip_subnet.nil?
-    _new_prefix_ip = ip_obj.mask([_private_ip_subnet.prefix() + 8, 24].min)
+  if (_private_ip_subnet = $private_ip_subnets.keys().find { |subnet| subnet.include?(ip_obj) })
+    _new_prefix_ip = ip_obj.mask([_private_ip_subnet.prefix + 8, ip_obj.ipv6? ? 64 : 24].min)
     _new_prefix_name = _new_prefix_ip.to_s
     if !_new_prefix_name.to_s.include?('/')
       _new_prefix_name += '/' + _new_prefix_ip.prefix().to_s
@@ -1082,7 +1319,8 @@ def autopopulate_prefixes(
     _prefix_post = { :prefix => _new_prefix_name,
                      :description => _new_prefix_name,
                      :tags => _autopopulate_tags,
-                     :site => site_id,
+                     :scope_type => "dcim.site",
+                     :scope_id => site_id,
                      :status => autopopulate_default_status }
     begin
       _new_prefix_create_response = nb.post('ipam/prefixes/', _prefix_post.to_json, @nb_headers).body
@@ -1092,7 +1330,7 @@ def autopopulate_prefixes(
       then
           _prefix_data = { :name => _new_prefix_name,
                            :id => _new_prefix_create_response.fetch(:id, nil),
-                           :site => ((_site = _new_prefix_create_response.fetch(:site, nil)) && _site&.has_key?(:name)) ? _site[:name] : _site&.fetch(:display, nil),
+                           :site => (((_new_prefix_create_response.fetch(:scope_type, nil) == "dcim.site") && (_scope = _new_prefix_create_response.fetch(:scope, nil))) && _scope&.has_key?(:name)) ? _scope[:name] : _scope&.fetch(:display, nil),
                            :tenant => ((_tenant = _new_prefix_create_response.fetch(:tenant, nil)) && _tenant&.has_key?(:name)) ? _tenant[:name] : _tenant&.fetch(:display, nil),
                            :url => _new_prefix_create_response.fetch(:url, nil),
                            :tags => _new_prefix_create_response.fetch(:tags, nil),
@@ -1183,11 +1421,12 @@ def netbox_lookup(
   previous_result: nil
 )
   _lookup_result = nil
+  _nb = nil
 
   _key_ip = IPAddr.new(ip_key) rescue nil
-  if !_key_ip.nil? && _key_ip&.private? && (@autopopulate || (!@target.nil? && !@target.empty?))
+  if assignable_private_ip?(_key_ip) && (@autopopulate || (!@target.nil? && !@target.empty?))
 
-    _nb = netbox_connection()
+    _nb = NetBoxConnLazy.new(@netbox_url, @netbox_token, @debug_verbose)
 
     _site_obj = lookup_or_create_site(site_id, '', _nb)
     _lookup_service_port = (@lookup_service ? event.get("#{@lookup_service_port_source}") : nil).to_i
@@ -1217,7 +1456,7 @@ def netbox_lookup(
         # then, for those IP addresses, search for devices pertaining to the interfaces assigned to each
         # IP address (e.g., ipam.ip_address -> dcim.interface -> dcim.device, or
         # ipam.ip_address -> virtualization.interface -> virtualization.virtual_machine)
-        _devices = lookup_devices(ip_key, site_id, _lookup_service_port, @netbox_url_base, @netbox_url_suffix, _nb)
+        _devices = lookup_devices(ip_key, site_id, _lookup_service_port, @netbox_url_base, @netbox_uri_suffix, _nb)
 
         if @autopopulate && (_devices.nil? || _devices.empty?)
           # no results found, autopopulate enabled, private-space IP address...
@@ -1242,6 +1481,7 @@ def netbox_lookup(
             _devices = Array.new unless _devices.is_a?(Array)
             _devices << { :name => _autopopulate_device&.fetch(:name, _autopopulate_device&.fetch(:display, nil)),
                           :id => _autopopulate_device&.fetch(:id, nil),
+                          :discovered => _autopopulate_device&.fetch(:discovered, nil),
                           :url => _autopopulate_device&.fetch(:url, nil),
                           :tags => _autopopulate_device&.fetch(:tags, nil),
                           :site => _site_obj&.fetch(:name, _site_obj&.fetch(:display, nil)),
@@ -1374,7 +1614,7 @@ def netbox_lookup(
 
             # we've made the change to netbox, do a call to lookup_devices to get the formatted/updated data
             #   (yeah, this is a *little* inefficient, but this should really only happen one extra time per device at most)
-            _devices = lookup_devices(ip_key, site_id, _lookup_service_port, @netbox_url_base, @netbox_url_suffix, _nb) if _device_written
+            _devices = lookup_devices(ip_key, site_id, _lookup_service_port, @netbox_url_base, @netbox_uri_suffix, _nb) if _device_written
 
           end # check _patched_device_data, _device_to_vm
 
@@ -1418,7 +1658,7 @@ def netbox_lookup(
   end # IP address is private IP
 
   # yield return value for _lookup_hash getset
-  (!_lookup_result.nil? && !_lookup_result.empty?) ? _lookup_result : nil
+  return (!_lookup_result.nil? && !_lookup_result.empty?) ? _lookup_result : nil, _key_ip, _nb&.initialized? || false
 end
 
 ###############################################################################

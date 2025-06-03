@@ -74,8 +74,8 @@ if mkdir "$DESTDIR"; then
   mkdir $VERBOSE -p "$DESTDIR/logstash/maps/"
   mkdir $VERBOSE -p "$DESTDIR/netbox/custom-plugins/requirements/"
   mkdir $VERBOSE -p "$DESTDIR/netbox/media/"
-  mkdir $VERBOSE -p "$DESTDIR/netbox/postgres/"
-  mkdir $VERBOSE -p "$DESTDIR/netbox/redis/"
+  mkdir $VERBOSE -p "$DESTDIR/postgres/"
+  mkdir $VERBOSE -p "$DESTDIR/redis/"
   mkdir $VERBOSE -p "$DESTDIR/netbox/preload/"
   mkdir $VERBOSE -p "$DESTDIR/nginx/ca-trust/"
   mkdir $VERBOSE -p "$DESTDIR/nginx/certs/"
@@ -103,7 +103,9 @@ if mkdir "$DESTDIR"; then
   mkdir $VERBOSE -p "$DESTDIR/zeek/intel/STIX/"
 
   cp $VERBOSE ./config/*.example "$DESTDIR/config/"
+  cp $VERBOSE ./config/*.yml "$DESTDIR/config/"
   cp $VERBOSE ./docker-compose.yml "$DESTDIR/docker-compose.yml"
+  cp $VERBOSE ./justfile "$DESTDIR/justfile"
   cp $VERBOSE ./scripts/install.py "$DESTDIR/scripts/"
   cp $VERBOSE ./scripts/control.py "$DESTDIR/scripts/"
   cp $VERBOSE ./scripts/malcolm_common.py "$DESTDIR/scripts/"
@@ -116,15 +118,9 @@ if mkdir "$DESTDIR"; then
   cp $VERBOSE -r ./netbox/config/ "$DESTDIR/netbox/"
   cp $VERBOSE ./netbox/preload/*.yml "$DESTDIR/netbox/preload/"
 
-  unset CONFIRMATION
-  echo ""
-  read -p "Package Kubernetes manifests in addition to docker-compose.yml [y/N]? " CONFIRMATION
-  CONFIRMATION=${CONFIRMATION:-N}
-  if [[ $CONFIRMATION =~ ^[Yy]$ ]]; then
-    mkdir $VERBOSE -p "$DESTDIR/kubernetes/"
-    cp $VERBOSE ./kubernetes/*.* "$DESTDIR/kubernetes/"
-    grep -v '^#' ./kubernetes/.gitignore | xargs -r -I XXX rm -f "$DESTDIR/kubernetes/XXX"
-  fi
+  mkdir $VERBOSE -p "$DESTDIR/kubernetes/"
+  cp $VERBOSE ./kubernetes/*.* "$DESTDIR/kubernetes/"
+  grep -v '^#' ./kubernetes/.gitignore | xargs -r -I XXX rm -f "$DESTDIR/kubernetes/XXX"
 
   pushd "$DESTDIR" >/dev/null 2>&1
   touch ./.opensearch.primary.curlrc ./.opensearch.secondary.curlrc

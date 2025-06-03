@@ -30,6 +30,8 @@ ENV FREQ_LOOKUP   $FREQ_LOOKUP
 
 ENV FREQ_URL "https://codeload.github.com/markbaggett/freq/tar.gz/master"
 
+ADD --chmod=644 freq-server/requirements.txt /usr/local/src/
+
 RUN apt-get -q update && \
     apt-get -y -q --no-install-recommends upgrade && \
     apt-get -y --no-install-recommends install \
@@ -42,7 +44,7 @@ RUN apt-get -q update && \
       python3-pip \
       rsync \
       tini && \
-    pip3 install --break-system-packages --no-compile --no-cache-dir supervisor six && \
+    pip3 install --break-system-packages --no-compile --no-cache-dir -r /usr/local/src/requirements.txt && \
     cd /opt && \
     mkdir -p ./freq_server && \
       curl -sSL "$FREQ_URL" | tar xzvf - -C ./freq_server --strip-components 1 && \
@@ -57,10 +59,11 @@ RUN apt-get -q update && \
       apt-get clean && \
       rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-COPY --chmod=755 shared/bin/docker-uid-gid-setup.sh /usr/local/bin/
-COPY --chmod=755 shared/bin/service_check_passthrough.sh /usr/local/bin/
 COPY --from=ghcr.io/mmguero-dev/gostatic --chmod=755 /goStatic /usr/bin/goStatic
-ADD freq-server/supervisord.conf /etc/supervisord.conf
+ADD --chmod=755 shared/bin/docker-uid-gid-setup.sh /usr/local/bin/
+ADD --chmod=755 shared/bin/service_check_passthrough.sh /usr/local/bin/
+ADD --chmod=755 container-health-scripts/freq.sh /usr/local/bin/container_health.sh
+ADD --chmod=644 freq-server/supervisord.conf /etc/supervisord.conf
 
 WORKDIR /opt/freq_server
 

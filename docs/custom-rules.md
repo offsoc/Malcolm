@@ -5,6 +5,7 @@
 * [Zeek](#Zeek)
 * [YARA](#YARA)
 * [NetBox Plugins](#NetBox)
+* [Logstash Output Pipelines](#Logstash)
 * [Other Customizations](#Other)
 
 Much of Malcolm's behavior can be adjusted through [environment variable files](malcolm-config.md#MalcolmConfigEnvVars). However, some components allow further customization through the use of custom scripts, configuration files, and rules.
@@ -51,11 +52,23 @@ On [Hedgehog Linux](hedgehog.md), the Arkime Lua directory is `/opt/sensor/senso
 
 In addition to the [default Suricata ruleset](https://github.com/OISF/suricata/tree/master/rules) and [Emerging Threads Open ruleset](https://rules.emergingthreats.net/open/), users may provide custom rules files for use by Suricata in Malcolm.
 
-Suricata rules files (with the `*.rules` extension) may be placed in the `./suricata/rules/` subdirectory in the Malcolm installation directory. These new rules files will be picked up immediately for subsequent [PCAP upload](upload.md#Upload), and for [live analysis](live-analysis.md#LocalPCAP) will be applied by either restarting Malcolm or when the [automatic rule update process](https://suricata-update.readthedocs.io/en/latest/) runs (if automatic rule updates are enabled). This can also be done manually without completely restarting Malcolm by running the following commands from the Malcolm installation directory:
+Suricata rules files (with the `*.rules` extension) may be placed in the `./suricata/rules/` subdirectory in the Malcolm installation directory. These new rules files will be picked up immediately for subsequent [PCAP upload](upload.md#Upload), and for [live analysis](live-analysis.md#LocalPCAP) will be applied by restarting Malcolm. This can also be done manually without interrupting the Suricata processes by running the following commands from the Malcolm installation directory.
 
+First, for the `suricata-live` container:
+
+```bash
+$ docker compose exec -u $(id -u) suricata-live bash -c 'suricata_config_populate.py --suricata /usr/bin/suricata-offline && kill -USR2 $(pidof suricata)'
 ```
-docker compose exec suricata-live supervisorctl restart live-suricata
+
+Then, for the `suricata` container:
+
+```bash
+$ docker compose exec -u $(id -u) suricata bash -c 'suricata_config_populate.py --suricata /usr/bin/suricata-offline && kill -USR2 $(pidof suricata-offline)'
 ```
+
+Alternately, both Suricata services could be completely restarted with `./scripts/restart -s suricata suricata-live`.
+
+For [Kubernetes deployments of Malcolm](kubernetes.md#Kubernetes), recreating the `suricata-offline-custom-rules-volume` and `suricata-live-custom-rules-volume` configMaps used by the [`suricata`]({{ site.github.repository_url }}/blob/{{ site.github.build_revision }}/kubernetes/11-suricata.yml) and [`suricata-live`]({{ site.github.repository_url }}/blob/{{ site.github.build_revision }}/kubernetes/22-suricata-live.yml) containers, respectively, and restarting those containers, will cause changes to custom rules files to be applied.
 
 If the `SURICATA_CUSTOM_RULES_ONLY` [environment variable](malcolm-config.md#MalcolmConfigEnvVars) is set to `true`, Malcolm will bypass the default Suricata rulesets and use only the user-defined rules.
 
@@ -144,6 +157,34 @@ When Malcolm's NetBox container [starts up]({{ site.github.repository_url }}/blo
 The following warning is quoted from the [NetBox documentation](https://netboxlabs.com/docs/netbox/en/stable/configuration/plugins/):
 
 > Plugins extend NetBox by allowing external code to run with the same access and privileges as NetBox itself. Only install plugins from trusted sources. The NetBox maintainers make absolutely no guarantees about the integrity or security of your installation with plugins enabled.
+
+## <a name="Logstash"></a>Logstash Output Pipelines
+
+Users may follow these steps to add additional [Logstash output plugins](https://www.elastic.co/docs/reference/logstash/plugins/output-plugins) to which Malcolm's Logstash enrichment pipeline will forward logs after parsing and enrichment.
+
+For example, this method may be used to forward Malcolm's logs to a generic [HTTP/HTTPS endpoint](https://www.elastic.co/docs/reference/logstash/plugins/plugins-outputs-http) (such as Splunk's [HTTP Event Collector](https://docs.splunk.com/Documentation/Splunk/latest/Data/UsetheHTTPEventCollector), HEC), a [Kafka topic](https://www.elastic.co/docs/reference/logstash/plugins/plugins-outputs-kafka), a [syslog server](https://www.elastic.co/docs/reference/logstash/plugins/plugins-outputs-syslog), a [websocket](https://www.elastic.co/docs/reference/logstash/plugins/plugins-outputs-websocket), a [TCP](https://www.elastic.co/docs/reference/logstash/plugins/plugins-outputs-tcp) or [UDP](https://www.elastic.co/docs/reference/logstash/plugins/plugins-outputs-udp) socket, or any number of other Logstash output plugins.
+
+1. In the Malcolm installation directory, create a new subdirectory named `./logstash/pipelines/my-pipeline-id`, replacing `my-pipeline-id` (used for the remainder of this example) with the name of the new pipeline. This directory name should only include alphanumeric characters, hyphens (`-`), and underscores (`_`).
+2. As a template/starting point, copy [these `.conf` files]({{ site.github.repository_url }}/tree/{{ site.github.build_revision }}/logstash/pipelines/external) into the new pipeline directory. Users may wish to rename the files `01_input_external_os.conf` and `99_opensearch_output.conf` to reflect the name of the new pipeline (e.g., `01_input_my-pipeline-id.conf` and `99_my-pipeline-id_output.conf`, respectively), but the filenames themselves don't really matter. However, the files should retain the sort order indicated by their `01_` and `99_` prefixes.
+3. Replace the input pipeline address name inside quotation marks the `01_`-prefixed file with the name of your pipeline (e.g., `my-pipeline-id`).
+4. Completely replace the contents of the `output` filter in the `99_`-prefixed file with the [output filter configuraiton](https://www.elastic.co/docs/reference/logstash/plugins/output-plugins) which Malcolm will use to forward the enriched logs.
+5. The contents of `00_config.conf` are for if the new output pipeline needs to be configured as a [persistent queue](https://www.elastic.co/docs/reference/logstash/persistent-queues), which helps protect against data loss during abnormal termination by storing the in-flight message queue to disk. Users who don't need persistent queuing for this output pipeline or who are unsure may delete `00_config.conf` from the new pipeline directory.
+6. Edit [`docker-compose.yml`]({{ site.github.repository_url }}/blob/{{ site.github.build_revision }}/docker-compose.yml) in the Malcolm installation directory.
+    * Add the following to `volumes` section under the `logstash` service, following the indentation and formatting of the other items in that section:
+
+    ```
+    - type: bind
+      bind:
+        create_host_path: false
+      source: ./logstash/pipelines/my-pipeline-id
+      target: /usr/share/logstash/malcolm-pipelines.available/my-pipeline-id
+      read_only: true
+    ```
+
+7. Define a new [environment variable](malcolm-config.md#MalcolmConfigEnvVars) in [`./config/logstash.env`]({{ site.github.repository_url }}/blob/{{ site.github.build_revision }}/config/logstash.env.example) named `LOGSTASH_OPENSEARCH_OUTPUT_PIPELINE_ADDRESSES` with the value `internal-os,external-os,my-pipeline-id`.
+8. [Restart Malcolm](running.md#StopAndRestart).
+
+
 
 ## <a name="Other"></a>Other Customizations
 

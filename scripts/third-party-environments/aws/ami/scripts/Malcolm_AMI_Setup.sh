@@ -32,7 +32,7 @@ fi
 # -u UID      (user UID, e.g., 1000)
 VERBOSE_FLAG=
 MALCOLM_REPO=${MALCOLM_REPO:-cisagov/Malcolm}
-MALCOLM_TAG=${MALCOLM_TAG:-v25.01.0}
+MALCOLM_TAG=${MALCOLM_TAG:-v25.05.0}
 [[ -z "$MALCOLM_UID" ]] && ( [[ $EUID -eq 0 ]] && MALCOLM_UID=1000 || MALCOLM_UID="$(id -u)" )
 while getopts 'vr:t:u:' OPTION; do
   case "$OPTION" in
@@ -92,6 +92,7 @@ function InstallEssentialPackages {
         dialog \
         git \
         httpd-tools \
+        jq \
         make \
         openssl \
         tmux \
@@ -113,10 +114,10 @@ function InstallPythonPackages {
         python3-requests+security
 
     $SUDO_CMD /usr/bin/python3 -m pip install $USERFLAG -U \
-        dateparser \
-        kubernetes \
-        python-dotenv \
-        pythondialog
+        dateparser==1.2.1 \
+        kubernetes==32.0.1 \
+        python-dotenv==1.1.0 \
+        pythondialog==3.5.3
 }
 
 ################################################################################
@@ -248,6 +249,24 @@ function _InstallCroc {
 }
 
 ################################################################################
+# _InstallYQ - mikefarah/yq: YAML command-line utility
+function _InstallYQ {
+  YQ_RELEASE="$(_GitLatestRelease mikefarah/yq)"
+  if [[ "$LINUX_CPU" == "arm64" ]]; then
+    YQ_URL="https://github.com/mikefarah/yq/releases/download/${YQ_RELEASE}/yq_linux_arm64"
+  elif [[ "$LINUX_CPU" == "amd64" ]]; then
+    YQ_URL="https://github.com/mikefarah/yq/releases/download/${YQ_RELEASE}/yq_linux_amd64"
+  else
+    YQ_URL=
+  fi
+  if [[ -n "$YQ_URL" ]]; then
+    $SUDO_CMD curl -sSL -o /usr/bin/yq "$YQ_URL"
+    $SUDO_CMD chmod 755 /usr/bin/yq
+    $SUDO_CMD chown root:root /usr/bin/yq
+  fi
+}
+
+################################################################################
 # _InstallBoringProxy - boringproxy/boringproxy: a reverse proxy and tunnel manager
 function _InstallBoringProxy {
   BORING_RELEASE="$(_GitLatestRelease boringproxy/boringproxy)"
@@ -271,6 +290,7 @@ function _InstallBoringProxy {
 # InstallUserLocalBinaries - install various tools to LOCAL_BIN_PATH
 function InstallUserLocalBinaries {
     [[ ! -f /usr/bin/croc ]] && _InstallCroc
+    [[ ! -f /usr/bin/yq ]] && _InstallYQ
     [[ ! -f /usr/bin/boringproxy ]] && _InstallBoringProxy
 }
 
@@ -287,7 +307,7 @@ function InstallMalcolm {
         for ENVEXAMPLE in ./config/*.example; do ENVFILE="${ENVEXAMPLE%.*}"; cp "$ENVEXAMPLE" "$ENVFILE"; done
         sed -i "s@\(/malcolm/.*\):\(.*\)@\1:\2${IMAGE_ARCH_SUFFIX}@g" docker-compose.yml
         echo "Pulling Docker images..." >&2
-        docker-compose --profile malcolm pull >/dev/null 2>&1
+        grep 'image:' docker-compose.yml | awk '{print $2}' | xargs -r -l docker pull
         rm -f ./config/*.env
         docker images
         popd >/dev/null 2>&1

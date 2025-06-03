@@ -4,19 +4,23 @@ kind: Deployment
 metadata:
   name: pcap-capture-deployment
   namespace: malcolm
+  labels:
+    app: pcap-capture
+    role: capture
 spec:
   selector:
     matchLabels:
-      name: pcap-capture-deployment
+      app: pcap-capture
   replicas: 1
   template:
     metadata:
       labels:
-        name: pcap-capture-deployment
+        app: pcap-capture
+        role: capture
     spec:
       containers:
       - name: pcap-capture-container
-        image: ghcr.io/idaholab/malcolm/pcap-capture:25.01.0
+        image: ghcr.io/idaholab/malcolm/pcap-capture:25.05.0
         imagePullPolicy: Always
         stdin: false
         tty: true
@@ -42,6 +46,15 @@ spec:
         env:
           - name: PCAP_CAPTURE_DISABLED
             value: "true"
+        livenessProbe:
+          exec:
+            command:
+            - /usr/local/bin/container_health.sh
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 15
+          successThreshold: 1
+          failureThreshold: 10
         volumeMounts:
           - mountPath: /var/local/ca-trust/configmap
             name: capture-var-local-catrust-volume
@@ -50,10 +63,17 @@ spec:
             subPath: "upload"
       initContainers:
       - name: pcap-capture-dirinit-container
-        image: ghcr.io/idaholab/malcolm/dirinit:25.01.0
+        image: ghcr.io/idaholab/malcolm/dirinit:25.05.0
         imagePullPolicy: Always
         stdin: false
         tty: true
+        resources:
+          requests:
+            cpu: "0.25"
+            memory: "128Mi"
+          limits:
+            cpu: "0.5"
+            memory: "256Mi"
         envFrom:
           - configMapRef:
               name: process-env

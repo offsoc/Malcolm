@@ -22,8 +22,9 @@ else
   CURL_CONFIG_PARAMS=()
 fi
 
-NODE_NAME=${PCAP_NODE_NAME:-""}
-NODE_HOST=${ARKIME_LIVE_NODE_HOST:-""}
+NODE_NAME=${PCAP_NODE_NAME}
+NODE_HOST=${ARKIME_LIVE_NODE_HOST}
+[[ -z "${NODE_HOST}" ]] && [[ -n "${NODE_NAME}" ]] && NODE_HOST="${NODE_NAME}"
 NODE_ARGS=()
 [[ -n "$NODE_NAME" ]] && NODE_ARGS+=( --node ) && NODE_ARGS+=( "$NODE_NAME" )
 [[ -n "$NODE_HOST" ]] && NODE_ARGS+=( --host ) && NODE_ARGS+=( "$NODE_HOST" )
@@ -60,7 +61,7 @@ fi
 
 # wait patiently for the non-live Arkime to initialize the database
 echo "Giving $OPENSEARCH_PRIMARY time to start..."
-/opt/opensearch_status.sh -t malcolm_template 2>&1 && echo "$OPENSEARCH_PRIMARY is running!"
+/usr/local/bin/opensearch_status.sh -t malcolm_template 2>&1 && echo "$OPENSEARCH_PRIMARY is running!"
 echo "Giving Arkime time to initialize..."
 sleep 5
 until (( $(curl "${CURL_CONFIG_PARAMS[@]}" -fs -XGET -H'Content-Type: application/json' "${OPENSEARCH_URL}/_cat/indices/arkime_users_v*" | wc -l) >= 1 )); do

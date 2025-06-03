@@ -33,7 +33,7 @@ USER root
 # see PUSER_CHOWN at the bottom of the file (after the other environment variables it references)
 
 # for download and install
-ARG ZEEK_VERSION=7.1.0-0
+ARG ZEEK_VERSION=7.2.0-0
 ENV ZEEK_VERSION $ZEEK_VERSION
 ARG ZEEK_DEB_ALTERNATE_DOWNLOAD_URL=""
 
@@ -46,11 +46,12 @@ ENV CCACHE_DIR "/var/spool/ccache"
 ENV CCACHE_COMPRESS 1
 
 # add script for downloading zeek and building 3rd-party plugins
-ADD shared/bin/zeek-deb-download.sh /usr/local/bin/
-ADD shared/bin/zeek_install_plugins.sh /usr/local/bin/
+ADD --chmod=755 shared/bin/zeek-deb-download.sh /usr/local/bin/
+ADD --chmod=755 shared/bin/zeek_install_plugins.sh /usr/local/bin/
 
 # custom one-off packages locally
 ADD zeek/custom-pkg "$ZEEK_DIR"/custom-pkg
+ADD --chmod=644 zeek/requirements.txt /usr/local/src/requirements.txt
 
 ENV SUPERCRONIC_VERSION "0.2.33"
 ENV SUPERCRONIC_URL "https://github.com/aptible/supercronic/releases/download/v$SUPERCRONIC_VERSION/supercronic-linux-"
@@ -117,12 +118,7 @@ RUN export BINARCH=$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/') 
       vim-tiny \
       xxd \
       zlib1g-dev && \
-    python3 -m pip install --break-system-packages --no-cache-dir \
-      dateparser \
-      git+https://github.com/google/mandiant-ti-client \
-      pymisp \
-      stix2 \
-      taxii2-client && \
+    python3 -m pip install --break-system-packages --no-cache-dir -r /usr/local/src/requirements.txt && \
     mkdir -p /tmp/zeek-packages && \
       bash /usr/local/bin/zeek-deb-download.sh -o /tmp/zeek-packages -z "${ZEEK_VERSION}" && \
       dpkg -i /tmp/zeek-packages/*.deb && \
@@ -151,22 +147,21 @@ RUN export BINARCH=$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/') 
       rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /var/cache/*/*
 
 # add configuration and scripts
-COPY --chmod=755 shared/bin/docker-uid-gid-setup.sh /usr/local/bin/
-COPY --chmod=755 shared/bin/service_check_passthrough.sh /usr/local/bin/
-COPY --chmod=755 shared/bin/zeek_intel_setup.sh ${ZEEK_DIR}/bin/
-COPY --chmod=755 shared/bin/zeekdeploy.sh ${ZEEK_DIR}/bin/
-COPY --chmod=755 zeek/scripts/container_health.sh /usr/local/bin/
-COPY --chmod=755 zeek/scripts/docker_entrypoint.sh /usr/local/bin/
 COPY --from=ghcr.io/mmguero-dev/gostatic --chmod=755 /goStatic /usr/bin/goStatic
-ADD shared/bin/pcap_processor.py /usr/local/bin/
-ADD shared/bin/pcap_utils.py /usr/local/bin/
-ADD scripts/malcolm_utils.py /usr/local/bin/
-ADD shared/bin/zeek*threat*.py ${ZEEK_DIR}/bin/
+ADD --chmod=755 shared/bin/docker-uid-gid-setup.sh /usr/local/bin/
+ADD --chmod=755 shared/bin/service_check_passthrough.sh /usr/local/bin/
+ADD --chmod=755 container-health-scripts/zeek.sh /usr/local/bin/container_health.sh
+ADD --chmod=755 shared/bin/zeek_intel_setup.sh ${ZEEK_DIR}/bin/
+ADD --chmod=755 shared/bin/zeekdeploy.sh ${ZEEK_DIR}/bin/
+ADD zeek/scripts /usr/local/bin
+ADD --chmod=755 shared/bin/pcap_processor.py /usr/local/bin/
+ADD --chmod=644 shared/bin/pcap_utils.py /usr/local/bin/
+ADD --chmod=644 scripts/malcolm_utils.py /usr/local/bin/
+ADD --chmod=755 shared/bin/zeek*threat*.py ${ZEEK_DIR}/bin/
 ADD shared/pcaps /tmp/pcaps
-ADD zeek/supervisord.conf /etc/supervisord.conf
-ADD zeek/config/*.zeek ${ZEEK_DIR}/share/zeek/site/
-ADD zeek/config/*.txt ${ZEEK_DIR}/share/zeek/site/
-
+ADD --chmod=644 zeek/supervisord.conf /etc/supervisord.conf
+ADD --chmod=644 zeek/config/*.zeek ${ZEEK_DIR}/share/zeek/site/
+ADD --chmod=644 zeek/config/*.txt ${ZEEK_DIR}/share/zeek/site/
 
 RUN groupadd --gid ${DEFAULT_GID} ${PUSER} && \
     useradd -M --uid ${DEFAULT_UID} --gid ${DEFAULT_GID} --home /nonexistant ${PUSER} && \
@@ -182,8 +177,8 @@ RUN groupadd --gid ${DEFAULT_GID} ${PUSER} && \
 
 # sanity checks to make sure the plugins installed and copied over correctly
 # these ENVs should match the third party scripts/plugins installed by zeek_install_plugins.sh
-ENV ZEEK_THIRD_PARTY_PLUGINS_GREP  "(Zeek::Spicy|ANALYZER_SPICY_OSPF|ANALYZER_SPICY_OPENVPN_UDP\b|ANALYZER_SPICY_IPSEC_UDP\b|ANALYZER_SPICY_TFTP|ANALYZER_SPICY_WIREGUARD|ANALYZER_SPICY_HART_IP_UDP|ANALYZER_SPICY_HART_IP_TCP|ANALYZER_OMRON_FINS_TCP|ANALYZER_OMRON_FINS_UDP|ANALYZER_SYNCHROPHASOR_TCP|ANALYZER_GENISYS_TCP|ANALYZER_SPICY_GE_SRTP|ANALYZER_SPICY_PROFINET_IO_CM|ANALYZER_S7COMM_TCP|Corelight::PE_XOR|ICSNPP::BACnet|ICSNPP::BSAP|ICSNPP::ENIP|ICSNPP::ETHERCAT|ICSNPP::OPCUA_Binary|Salesforce::GQUIC|Zeek::PROFINET|Zeek::TDS|Seiso::Kafka)"
-ENV ZEEK_THIRD_PARTY_SCRIPTS_GREP  "(bro-is-darknet/main|bro-simple-scan/scan|bzar/main|callstranger-detector/callstranger|cve-2020-0601/cve-2020-0601|cve-2020-13777/cve-2020-13777|CVE-2020-16898/CVE-2020-16898|CVE-2021-1675/main|CVE-2021-31166/detect|CVE-2021-38647/omigod|CVE-2021-41773/CVE_2021_41773|CVE-2021-42292/main|cve-2021-44228/CVE_2021_44228|cve-2022-21907/main|cve-2022-22954/main|CVE-2022-23270-PPTP/main|CVE-2022-24491/main|CVE-2022-24497/main|cve-2022-26809/main|CVE-2022-26937/main|CVE-2022-30216/main|CVE-2022-3602/__load__|hassh/hassh|http-more-files-names/main|ja4/main|pingback/detect|ripple20/ripple20|SIGRed/CVE-2020-1350|zeek-agenttesla-detector/main|zeek-asyncrat-detector/main|zeek-EternalSafety/main|zeek-httpattacks/main|zeek-netsupport-detector/main|zeek-quasarrat-detector/main|zeek-sniffpass/__load__|zeek-strrat-detector/main|zerologon/main)\.(zeek|bro)"
+ENV ZEEK_THIRD_PARTY_PLUGINS_GREP  "(Zeek::Spicy|ANALYZER_SPICY_OSPF|ANALYZER_SPICY_OPENVPN_UDP\b|ANALYZER_SPICY_IPSEC_UDP\b|ANALYZER_SPICY_TFTP|ANALYZER_SPICY_WIREGUARD|ANALYZER_SPICY_HART_IP_UDP|ANALYZER_SPICY_HART_IP_TCP|ANALYZER_ROC_PLUS_TCP|ANALYZER_ROC_PLUS_UDP|ANALYZER_OMRON_FINS_TCP|ANALYZER_OMRON_FINS_UDP|ANALYZER_SYNCHROPHASOR_TCP|ANALYZER_GENISYS_TCP|ANALYZER_SPICY_GE_SRTP|ANALYZER_SPICY_PROFINET_IO_CM|ANALYZER_S7COMM_TCP|Corelight::PE_XOR|ICSNPP::BACnet|ICSNPP::BSAP|ICSNPP::ENIP|ICSNPP::ETHERCAT|ICSNPP::OPCUA_Binary|Salesforce::GQUIC|Zeek::PROFINET|Zeek::TDS|Seiso::Kafka)"
+ENV ZEEK_THIRD_PARTY_SCRIPTS_GREP  "(bro-is-darknet/main|bro-simple-scan/scan|bzar/main|callstranger-detector/callstranger|cve-2020-0601/cve-2020-0601|cve-2020-13777/cve-2020-13777|CVE-2020-16898/CVE-2020-16898|CVE-2021-1675/main|CVE-2021-31166/detect|CVE-2021-38647/omigod|CVE-2021-41773/CVE_2021_41773|CVE-2021-42292/main|cve-2021-44228/CVE_2021_44228|cve-2022-21907/main|cve-2022-22954/main|CVE-2022-23270-PPTP/main|CVE-2022-24491/main|CVE-2022-24497/main|cve-2022-26809/main|CVE-2022-26937/main|CVE-2022-30216/main|CVE-2022-3602/__load__|hassh/hassh|http-more-files-names/main|ja4/main|pingback/detect|ripple20/ripple20|SIGRed/CVE-2020-1350|zeek-agenttesla-detector/main|zeek-asyncrat-detector/main|zeek-EternalSafety/main|zeek-httpattacks/main|zeek-netsupport-detector/main|zeek-quasarrat-detector/main|zeek-sniffpass/__load__|zeek-strrat-detector/main|zerologon/main|zeek-long-connections/main)\.(zeek|bro)"
 
 RUN mkdir -p /tmp/logs && \
     cd /tmp/logs && \

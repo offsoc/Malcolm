@@ -42,6 +42,8 @@ ENV LOGSTASH_OPENSEARCH_OUTPUT_PIPELINE_ADDRESSES $LOGSTASH_OPENSEARCH_OUTPUT_PI
 
 USER root
 
+ADD --chmod=644 logstash/requirements.txt /usr/local/src/
+
 RUN set -x && \
     apt-get -q update && \
     apt-get -y -q --no-install-recommends upgrade && \
@@ -56,7 +58,7 @@ RUN set -x && \
         python3-requests \
         rsync \
         tini && \
-    pip3 install ipaddress supervisor manuf pyyaml && \
+    pip3 install -r /usr/local/src/requirements.txt && \
     export JAVA_HOME=/usr/share/logstash/jdk && \
     /usr/share/logstash/vendor/jruby/bin/jruby -S gem install bundler && \
     echo "gem 'concurrent-ruby'" >> /usr/share/logstash/Gemfile && \
@@ -79,21 +81,22 @@ RUN set -x && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /usr/bin/jruby \
            /root/.cache /root/.gem /root/.bundle
 
-COPY --chmod=755 shared/bin/docker-uid-gid-setup.sh /usr/local/bin/
-COPY --chmod=755 shared/bin/service_check_passthrough.sh /usr/local/bin/
-COPY --chmod=755 shared/bin/opensearch_status.sh /usr/local/bin/
 COPY --from=ghcr.io/mmguero-dev/gostatic --chmod=755 /goStatic /usr/bin/goStatic
-COPY --chmod=755 shared/bin/jdk-cacerts-auto-import.sh /usr/local/bin/
-COPY --chmod=755 shared/bin/keystore-bootstrap.sh /usr/local/bin/
-ADD logstash/maps/*.yaml /etc/
-ADD logstash/config/log4j2.properties /usr/share/logstash/config/
-ADD logstash/config/logstash.yml /usr/share/logstash/config/logstash.orig.yml
+ADD --chmod=755 shared/bin/docker-uid-gid-setup.sh /usr/local/bin/
+ADD --chmod=755 shared/bin/service_check_passthrough.sh /usr/local/bin/
+ADD --chmod=755 container-health-scripts/logstash.sh /usr/local/bin/container_health.sh
+ADD --chmod=755 shared/bin/opensearch_status.sh /usr/local/bin/
+ADD --chmod=755 shared/bin/jdk-cacerts-auto-import.sh /usr/local/bin/
+ADD --chmod=755 shared/bin/keystore-bootstrap.sh /usr/local/bin/
+ADD --chmod=644 logstash/maps/*.yaml /etc/
+ADD --chmod=644 logstash/config/log4j2.properties /usr/share/logstash/config/
+ADD --chmod=644 logstash/config/logstash.yml /usr/share/logstash/config/logstash.orig.yml
 ADD logstash/pipelines/ /usr/share/logstash/malcolm-pipelines/
 ADD logstash/patterns/ /usr/share/logstash/malcolm-patterns/
 ADD logstash/ruby/ /usr/share/logstash/malcolm-ruby/
 ADD logstash/scripts /usr/local/bin/
-ADD scripts/malcolm_utils.py /usr/local/bin/
-ADD logstash/supervisord.conf /etc/supervisord.conf
+ADD --chmod=644 scripts/malcolm_utils.py /usr/local/bin/
+ADD --chmod=644 logstash/supervisord.conf /etc/supervisord.conf
 
 RUN bash -c "chmod --silent 755 /usr/local/bin/*.sh /usr/local/bin/*.py || true" && \
     usermod -a -G tty ${PUSER} && \
@@ -110,10 +113,10 @@ RUN bash -c "chmod --silent 755 /usr/local/bin/*.sh /usr/local/bin/*.py || true"
     python3 /usr/local/bin/manuf-oui-parse.py -o /etc/vendor_macs.yaml && \
     echo "Complete."
 
-# As the keystore is encapsulated in logstash, this isn't really necessary. It's included
-# here just to suppress the prompt when creating the keystore. If you're concerned about it
-# you could change or remove this from the Dockerfile, and/or override it with your
-# own envrionment variable at runtime.
+# As the keystore is encapsulated in the container, there's nothing actually stored in this keystore.
+# It's included here just to suppress the prompt when creating the keystore.
+# If you're concerned about it you could change or remove this from the Dockerfile,
+# and/or override it with your own envrionment variable at runtime.
 ENV LOGSTASH_KEYSTORE_PASS "a410a267b1404c949284dee25518a917"
 
 # see PUSER_CHOWN comment above

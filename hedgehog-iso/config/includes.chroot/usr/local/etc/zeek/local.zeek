@@ -18,8 +18,11 @@ global synchrophasor_detailed = (getenv("ZEEK_SYNCHROPHASOR_DETAILED") == true_r
 global synchrophasor_ports_str = getenv("ZEEK_SYNCHROPHASOR_PORTS");
 global genisys_ports_str = getenv("ZEEK_GENISYS_PORTS");
 global enip_ports_str = getenv("ZEEK_ENIP_PORTS");
-global zeek_ja4_ssh_packet_count = (getenv("ZEEK_JA4SSH_PACKET_COUNT") == "") ? 200 : to_count(getenv("ZEEK_JA4SSH_PACKET_COUNT"));
-global zeek_local_nets_str = getenv("ZEEK_LOCAL_NETS");
+global ja4_ssh_packet_count = (getenv("ZEEK_JA4SSH_PACKET_COUNT") == "") ? 200 : to_count(getenv("ZEEK_JA4SSH_PACKET_COUNT"));
+global local_nets_str = getenv("ZEEK_LOCAL_NETS");
+global long_conn_durations = getenv("ZEEK_LONG_CONN_DURATIONS");
+global long_conn_repeat_last_duration = (getenv("ZEEK_LONG_CONN_REPEAT_LAST_DURATION") == true_regex) ? T : F;
+global long_conn_do_notice = (getenv("ZEEK_LONG_CONN_DO_NOTICE") == true_regex) ? T : F;
 
 global disable_spicy_ipsec = (getenv("ZEEK_DISABLE_SPICY_IPSEC") == true_regex) ? T : F;
 global disable_spicy_ldap = (getenv("ZEEK_DISABLE_SPICY_LDAP") == true_regex) ? T : F;
@@ -44,6 +47,7 @@ global disable_ics_opcua_binary = (getenv("ZEEK_DISABLE_ICS_OPCUA_BINARY") == tr
 global disable_ics_modbus = (getenv("ZEEK_DISABLE_ICS_MODBUS") == true_regex) ? T : F;
 global disable_ics_profinet = (getenv("ZEEK_DISABLE_ICS_PROFINET") == true_regex) ? T : F;
 global disable_ics_profinet_io_cm = (getenv("ZEEK_DISABLE_ICS_PROFINET_IO_CM") == true_regex) ? T : F;
+global disable_ics_roc_plus = (getenv("ZEEK_DISABLE_ICS_ROC_PLUS") == true_regex) ? T : F;
 global disable_ics_s7comm = (getenv("ZEEK_DISABLE_ICS_S7COMM") == true_regex) ? T : F;
 global disable_ics_synchrophasor = (getenv("ZEEK_DISABLE_ICS_SYNCHROPHASOR") == true_regex) ? T : F;
 
@@ -125,14 +129,32 @@ global json_format = (getenv("ZEEK_JSON") == true_regex) ? T : F;
 
 event zeek_init() &priority=-5 {
 
-  if (zeek_local_nets_str != "") {
-    local nets_strs = split_string(zeek_local_nets_str, /,/);
+  if (local_nets_str != "") {
+    local nets_strs = split_string(local_nets_str, /,/);
     if (|nets_strs| > 0) {
       for (net_idx in nets_strs) {
         local local_subnet = to_subnet(nets_strs[net_idx]);
         if (local_subnet != [::]/0) {
           add Site::local_nets[local_subnet];
         }
+      }
+    }
+  }
+
+  if (long_conn_durations != "") {
+    local durations_strs = split_string(long_conn_durations, /,/);
+    if (|durations_strs| > 0) {
+      local new_durations = vector(0min);
+      delete new_durations;
+      for (dur_idx in durations_strs) {
+        local dur_doub = to_double(durations_strs[dur_idx]);
+        if (dur_doub > 0.0) {
+          new_durations += double_to_interval(dur_doub);
+        }
+      }
+      if (|new_durations| > 0) {
+        delete LongConnection::default_durations;
+        LongConnection::default_durations += new_durations;
       }
     }
   }
@@ -179,6 +201,10 @@ event zeek_init() &priority=-5 {
   }
   if (disable_ics_all || disable_ics_profinet_io_cm) {
     Spicy::disable_protocol_analyzer(Analyzer::ANALYZER_SPICY_PROFINET_IO_CM);
+  }
+  if (disable_ics_all || disable_ics_roc_plus) {
+    Spicy::disable_protocol_analyzer(Analyzer::ANALYZER_ROC_PLUS_TCP);
+    Spicy::disable_protocol_analyzer(Analyzer::ANALYZER_ROC_PLUS_UDP);
   }
   if (disable_ics_all || disable_ics_s7comm) {
     Analyzer::disable_analyzer(Analyzer::ANALYZER_S7COMM_TCP);
@@ -297,12 +323,14 @@ event zeek_init() &priority=-5 {
   redef LDAP::default_capture_password = T;
 @endif
 
-redef FINGERPRINT::JA4SSH::ja4_ssh_packet_count = zeek_ja4_ssh_packet_count;
+redef FINGERPRINT::JA4SSH::ja4_ssh_packet_count = ja4_ssh_packet_count;
 redef HTTP::log_client_header_names = T;
 redef HTTP::log_server_header_names = T;
 redef LDAP::default_log_search_attributes = F;
 redef SNIFFPASS::notice_log_enable = F;
 redef CVE_2021_44228::log = F;
+redef LongConnection::repeat_last_duration = long_conn_repeat_last_duration;
+redef LongConnection::do_notice = long_conn_do_notice;
 
 @if ((!disable_ics_all) && (!disable_ics_synchrophasor) && (!synchrophasor_detailed))
   hook SYNCHROPHASOR::log_policy_sychrophasor_data_detail(

@@ -5,12 +5,13 @@ metadata:
   name: dashboards-helper
   namespace: malcolm
 spec:
+  type: ClusterIP
   ports:
     - port: 28991
       protocol: TCP
       name: http
   selector:
-    name: dashboards-helper-deployment
+    app: dashboards-helper
 
 ---
 apiVersion: apps/v1
@@ -18,19 +19,23 @@ kind: Deployment
 metadata:
   name: dashboards-helper-deployment
   namespace: malcolm
+  labels:
+    app: dashboards-helper
+    role: service
 spec:
   selector:
     matchLabels:
-      name: dashboards-helper-deployment
+      app: dashboards-helper
   replicas: 1
   template:
     metadata:
       labels:
-        name: dashboards-helper-deployment
+        app: dashboards-helper
+        role: service
     spec:
       containers:
       - name: dashboards-helper-container
-        image: ghcr.io/idaholab/malcolm/dashboards-helper:25.01.0
+        image: ghcr.io/idaholab/malcolm/dashboards-helper:25.05.0
         imagePullPolicy: Always
         stdin: false
         tty: true
@@ -46,6 +51,8 @@ spec:
           - configMapRef:
               name: opensearch-env
           - configMapRef:
+              name: netbox-common-env
+          - configMapRef:
               name: dashboards-env
           - configMapRef:
               name: dashboards-helper-env
@@ -55,10 +62,7 @@ spec:
         livenessProbe:
           exec:
             command:
-            - supervisorctl
-            - status
-            - cron
-            - maps
+            - /usr/local/bin/container_health.sh
           initialDelaySeconds: 30
           periodSeconds: 30
           timeoutSeconds: 15

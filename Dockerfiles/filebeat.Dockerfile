@@ -73,13 +73,15 @@ ENV SUPERCRONIC_VERSION "0.2.33"
 ENV SUPERCRONIC_URL "https://github.com/aptible/supercronic/releases/download/v$SUPERCRONIC_VERSION/supercronic-linux-"
 ENV SUPERCRONIC_CRONTAB "/etc/crontab"
 
-ENV YQ_VERSION "4.45.1"
+ENV YQ_VERSION "4.45.4"
 ENV YQ_URL "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_"
 
-ENV EVTX_VERSION "0.8.4"
+ENV EVTX_VERSION "0.9.0"
 ENV EVTX_URL "https://github.com/omerbenamram/evtx/releases/download/v${EVTX_VERSION}/evtx_dump-v${EVTX_VERSION}-XXX-unknown-linux-gnu"
 
 USER root
+
+ADD --chmod=644 filebeat/requirements.txt /usr/local/src/
 
 RUN export EVTXARCH=$(uname -m | sed 's/arm64/aarch64/') && \
     export BINARCH=$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/') && \
@@ -109,7 +111,7 @@ RUN export EVTXARCH=$(uname -m | sed 's/arm64/aarch64/') && \
         unar \
         unzip \
         xz-utils && \
-    python3 -m pip install --no-compile --no-cache-dir --break-system-packages patool entrypoint2 pyunpack python-magic ordered-set supervisor watchdog==6.0.0 && \
+    python3 -m pip install --no-compile --no-cache-dir --break-system-packages -r /usr/local/src/requirements.txt && \
     curl -fsSL -o /usr/local/bin/supercronic "${SUPERCRONIC_URL}${BINARCH}" && \
       chmod +x /usr/local/bin/supercronic && \
     curl -fsSL -o /usr/local/bin/yq "${YQ_URL}${BINARCH}" && \
@@ -120,20 +122,21 @@ RUN export EVTXARCH=$(uname -m | sed 's/arm64/aarch64/') && \
         apt-get clean && \
         rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-COPY --chmod=755 shared/bin/docker-uid-gid-setup.sh /usr/local/bin/
-COPY --chmod=755 filebeat/scripts/evtx_to_jsonl.sh /usr/local/bin/
-COPY --chmod=755 shared/bin/service_check_passthrough.sh /usr/local/bin/
 COPY --from=ghcr.io/mmguero-dev/gostatic --chmod=755 /goStatic /usr/bin/goStatic
-ADD filebeat/filebeat-logs.yml /usr/share/filebeat-logs/filebeat-logs.yml
-ADD filebeat/filebeat-nginx.yml /usr/share/filebeat-nginx/filebeat-nginx.yml
-ADD filebeat/filebeat-tcp.yml /usr/share/filebeat-tcp/filebeat-tcp.yml
-ADD filebeat/filebeat-syslog-udp.yml /usr/share/filebeat-syslog-udp/filebeat-syslog-udp.yml
-ADD filebeat/filebeat-syslog-tcp.yml /usr/share/filebeat-syslog-tcp/filebeat-syslog-tcp.yml
+ADD --chmod=755 shared/bin/docker-uid-gid-setup.sh /usr/local/bin/
+ADD --chmod=755 shared/bin/service_check_passthrough.sh /usr/local/bin/
+ADD --chmod=755 container-health-scripts/filebeat.sh /usr/local/bin/container_health.sh
+ADD --chmod=644 filebeat/filebeat-logs.yml /usr/share/filebeat-logs/filebeat-logs.yml
+ADD --chmod=644 filebeat/filebeat-nginx.yml /usr/share/filebeat-nginx/filebeat-nginx.yml
+ADD --chmod=644 filebeat/filebeat-tcp.yml /usr/share/filebeat-tcp/filebeat-tcp.yml
+ADD --chmod=644 filebeat/filebeat-syslog-udp.yml /usr/share/filebeat-syslog-udp/filebeat-syslog-udp.yml
+ADD --chmod=644 filebeat/filebeat-syslog-tcp.yml /usr/share/filebeat-syslog-tcp/filebeat-syslog-tcp.yml
 ADD filebeat/scripts /usr/local/bin/
-ADD scripts/malcolm_utils.py /usr/local/bin/
-ADD shared/bin/watch_common.py /usr/local/bin/
-ADD shared/bin/opensearch_status.sh /usr/local/bin/
-ADD filebeat/supervisord.conf /etc/supervisord.conf
+ADD --chmod=644 scripts/malcolm_utils.py /usr/local/bin/
+ADD --chmod=644 shared/bin/watch_common.py /usr/local/bin/
+ADD --chmod=755 shared/bin/opensearch_status.sh /usr/local/bin/
+ADD --chmod=644 filebeat/supervisord.conf /etc/supervisord.conf
+
 RUN for INPUT in logs nginx tcp syslog-tcp syslog-udp; do \
       mkdir -p /usr/share/filebeat-$INPUT/data; \
       chown -R root:${PGROUP} /usr/share/filebeat-$INPUT; \

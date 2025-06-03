@@ -4,19 +4,23 @@ kind: Deployment
 metadata:
   name: zeek-live-deployment
   namespace: malcolm
+  labels:
+    app: zeek-live
+    role: capture
 spec:
   selector:
     matchLabels:
-      name: zeek-live-deployment
+      app: zeek-live
   replicas: 1
   template:
     metadata:
       labels:
-        name: zeek-live-deployment
+        app: zeek-live
+        role: capture
     spec:
       containers:
       - name: zeek-live-container
-        image: ghcr.io/idaholab/malcolm/zeek:25.01.0
+        image: ghcr.io/idaholab/malcolm/zeek:25.05.0
         imagePullPolicy: Always
         stdin: false
         tty: true
@@ -36,13 +40,22 @@ spec:
           - configMapRef:
               name: upload-common-env
           - configMapRef:
+              name: pcap-capture-env
+          - configMapRef:
               name: zeek-env
           - secretRef:
               name: zeek-secret-env
           - configMapRef:
               name: zeek-live-env
-          - configMapRef:
-              name: pcap-capture-env
+        livenessProbe:
+          exec:
+            command:
+            - /usr/local/bin/container_health.sh
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 15
+          successThreshold: 1
+          failureThreshold: 10
         volumeMounts:
           - mountPath: /var/local/ca-trust/configmap
             name: zeek-live-var-local-catrust-volume
@@ -61,10 +74,17 @@ spec:
             subPath: "zeek/intel"
       initContainers:
       - name: zeek-live-dirinit-container
-        image: ghcr.io/idaholab/malcolm/dirinit:25.01.0
+        image: ghcr.io/idaholab/malcolm/dirinit:25.05.0
         imagePullPolicy: Always
         stdin: false
         tty: true
+        resources:
+          requests:
+            cpu: "0.25"
+            memory: "128Mi"
+          limits:
+            cpu: "0.5"
+            memory: "256Mi"
         envFrom:
           - configMapRef:
               name: process-env

@@ -33,7 +33,7 @@ ENV PYTHONDONTWRITEBYTECODE 1
 ENV PYTHONUNBUFFERED 1
 
 ENV ARKIME_DIR "/opt/arkime"
-ENV ARKIME_VERSION "5.6.0"
+ENV ARKIME_VERSION "5.6.4"
 ENV ARKIME_DEB_URL "https://github.com/arkime/arkime/releases/download/v${ARKIME_VERSION}/arkime_${ARKIME_VERSION}-1.debian12_XXX.deb"
 ENV ARKIME_JA4_SO_URL "https://github.com/arkime/arkime/releases/download/v${ARKIME_VERSION}/ja4plus.XXX.so"
 ENV ARKIME_LOCALELASTICSEARCH no
@@ -49,6 +49,7 @@ ARG ARKIME_TPACKETV3_NUM_THREADS=2
 ARG OPENSEARCH_MAX_SHARDS_PER_NODE=2500
 ARG WISE=on
 ARG VIEWER=on
+ARG ARKIME_SSL=true
 ARG ARKIME_VIEWER_PORT=8005
 #Whether or not Arkime is in charge of deleting old PCAP files to reclaim space
 ARG MANAGE_PCAP_FILES=false
@@ -85,6 +86,7 @@ ENV ARKIME_ROTATED_PCAP $ARKIME_ROTATED_PCAP
 ENV OPENSEARCH_MAX_SHARDS_PER_NODE $OPENSEARCH_MAX_SHARDS_PER_NODE
 ENV WISE $WISE
 ENV VIEWER $VIEWER
+ENV ARKIME_SSL $ARKIME_SSL
 ENV ARKIME_VIEWER_PORT $ARKIME_VIEWER_PORT
 ENV MANAGE_PCAP_FILES $MANAGE_PCAP_FILES
 ENV AUTO_TAG $AUTO_TAG
@@ -92,6 +94,7 @@ ENV PCAP_PIPELINE_VERBOSITY $PCAP_PIPELINE_VERBOSITY
 ENV PCAP_MONITOR_HOST $PCAP_MONITOR_HOST
 ENV PCAP_NODE_NAME $PCAP_NODE_NAME
 
+ADD --chmod=644 arkime/requirements.txt /usr/local/src/
 
 RUN export DEBARCH=$(dpkg --print-architecture) && \
     sed -i "s/main$/main contrib non-free/g" /etc/apt/sources.list.d/debian.sources && \
@@ -146,10 +149,10 @@ RUN export DEBARCH=$(dpkg --print-architecture) && \
       curl -fsSL -o ./arkime.deb "$(echo "${ARKIME_DEB_URL}" | sed "s/XXX/${DEBARCH}/g")" && \
       dpkg -i /tmp/arkime.deb && \
       rm -f ${ARKIME_DIR}/wiseService/source.* ${ARKIME_DIR}/etc/*.systemd.service && \
-    mkdir -p "${ARKIME_DIR}"/plugins && \
+    mkdir -p "${ARKIME_DIR}"/plugins "${ARKIME_DIR}"/rules && \
       curl -fsSL -o "${ARKIME_DIR}/plugins/ja4plus.${DEBARCH}.so" "$(echo "${ARKIME_JA4_SO_URL}" | sed "s/XXX/${DEBARCH}/g")" && \
       chmod 755 "${ARKIME_DIR}/plugins/ja4plus.${DEBARCH}.so" && \
-    python3 -m pip install --break-system-packages --no-compile --no-cache-dir beautifulsoup4 pyzmq watchdog==6.0.0 && \
+    python3 -m pip install --break-system-packages --no-compile --no-cache-dir -r /usr/local/src/requirements.txt && \
     ln -sfr $ARKIME_DIR/bin/npm /usr/local/bin/npm && \
       ln -sfr $ARKIME_DIR/bin/node /usr/local/bin/node && \
       ln -sfr $ARKIME_DIR/bin/npx /usr/local/bin/npx && \
@@ -159,22 +162,23 @@ RUN export DEBARCH=$(dpkg --print-architecture) && \
       rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # add configuration and scripts
-COPY --chmod=755 shared/bin/docker-uid-gid-setup.sh /usr/local/bin/
-COPY --chmod=755 shared/bin/service_check_passthrough.sh /usr/local/bin/
-COPY --chmod=755 shared/bin/self_signed_key_gen.sh /usr/local/bin/
-COPY --chmod=755 shared/bin/maxmind-mmdb-download.sh /usr/local/bin/
-COPY --chmod=755 shared/bin/nic-capture-setup.sh /usr/local/bin/
-COPY --chmod=755 shared/bin/opensearch_status.sh /opt
-COPY --chmod=755 shared/bin/pcap_processor.py /opt/
-COPY --chmod=644 shared/bin/pcap_utils.py /opt/
-COPY --chmod=644 scripts/malcolm_utils.py /opt/
-COPY --chmod=644 shared/bin/watch_common.py /opt/
-COPY --chmod=644 arkime/supervisord.conf /etc/supervisord.conf
-ADD arkime/scripts /opt/
-ADD arkime/etc $ARKIME_DIR/etc/
-ADD arkime/rules/*.yml $ARKIME_DIR/rules/
-ADD arkime/wise/source.*.js $ARKIME_DIR/wiseService/
 COPY --from=ghcr.io/mmguero-dev/gostatic --chmod=755 /goStatic /usr/bin/goStatic
+ADD --chmod=755 shared/bin/docker-uid-gid-setup.sh /usr/local/bin/
+ADD --chmod=755 shared/bin/service_check_passthrough.sh /usr/local/bin/
+ADD --chmod=755 shared/bin/self_signed_key_gen.sh /usr/local/bin/
+ADD --chmod=755 shared/bin/maxmind-mmdb-download.sh /usr/local/bin/
+ADD --chmod=755 shared/bin/nic-capture-setup.sh /usr/local/bin/
+ADD --chmod=755 shared/bin/opensearch_status.sh /usr/local/bin/
+ADD --chmod=755 shared/bin/pcap_processor.py /usr/local/bin/
+ADD --chmod=644 shared/bin/pcap_utils.py /usr/local/bin/
+ADD --chmod=644 scripts/malcolm_utils.py /usr/local/bin/
+ADD --chmod=644 shared/bin/watch_common.py /usr/local/bin/
+ADD --chmod=644 arkime/supervisord.conf /etc/supervisord.conf
+ADD --chmod=755 container-health-scripts/arkime.sh /usr/local/bin/container_health.sh
+ADD arkime/scripts /usr/local/bin/
+ADD arkime/etc $ARKIME_DIR/etc/
+ADD --chmod=644 arkime/rules/*.yml $ARKIME_DIR/rules/
+ADD --chmod=644 arkime/wise/source.*.js $ARKIME_DIR/wiseService/
 
 # MaxMind now requires a (free) license key to download the free versions of
 # their GeoIP databases. This should be provided as a build argument.
@@ -188,9 +192,9 @@ RUN ( /usr/local/bin/maxmind-mmdb-download.sh -o $ARKIME_DIR/etc || true ) && \
 RUN groupadd --gid $DEFAULT_GID $PGROUP && \
     useradd -M --uid $DEFAULT_UID --gid $DEFAULT_GID --home $ARKIME_DIR $PUSER && \
       usermod -a -G tty $PUSER && \
-    chmod 755 /opt/*.sh /usr/local/bin/*.sh && \
-    ln -sfr /opt/pcap_processor.py /opt/pcap_arkime_processor.py && \
-    cp -f /opt/arkime_update_geo.sh $ARKIME_DIR/bin/arkime_update_geo.sh && \
+    chmod 755 /usr/local/bin/*.sh && \
+    ln -sfr /usr/local/bin/pcap_processor.py /usr/local/bin/pcap_arkime_processor.py && \
+    ln -sfr /usr/local/bin/arkime_update_geo.sh $ARKIME_DIR/bin/arkime_update_geo.sh && \
     mv $ARKIME_DIR/etc/config.ini $ARKIME_DIR/etc/config.orig.ini && \
     cp $ARKIME_DIR/bin/capture $ARKIME_DIR/bin/capture-offline && \
     chown root:${PGROUP} $ARKIME_DIR/bin/capture && \
@@ -210,7 +214,7 @@ ENTRYPOINT ["/usr/bin/tini", \
             "/usr/local/bin/docker-uid-gid-setup.sh", \
             "/usr/local/bin/service_check_passthrough.sh", \
             "-s", "arkime", \
-            "/opt/docker_entrypoint.sh"]
+            "/usr/local/bin/docker_entrypoint.sh"]
 
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisord.conf", "-n"]
 

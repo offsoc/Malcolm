@@ -18,6 +18,7 @@
 # ZEEK_LB_PROCS_LOGGER - Defines the number of processors to be assigned to the [loggers](https://docs.zeek.org/en/master/frameworks/cluster.html#logger) (default 1)
 # ZEEK_LB_PROCS_PROXY - Defines the number of processors to be assigned to the [proxies](https://docs.zeek.org/en/master/frameworks/cluster.html#proxy) (default 1)
 # ZEEK_LB_PROCS_CPUS_RESERVED - If ZEEK_LB_PROCS_WORKER_DEFAULT is 0 ("autocalculate"), exclude this number of CPUs from the autocalculation (defaults to 1 (kernel) + 1 (manager) + ZEEK_LB_PROCS_LOGGER + ZEEK_LB_PROCS_PROXY)
+# ZEEK_METRICS_PORT - Defines listen port for Prometheus API
 # ZEEK_PIN_CPUS_WORKER_AUTO - Automatically [pin worker CPUs](https://en.wikipedia.org/wiki/Processor_affinity) (default false)
 # ZEEK_PIN_CPUS_WORKER_n - Explicitly defines the processor IDs to be to be assigned to the group of workers for the *n*-th capture interface (e.g., 0 means "the first CPU"; 12,13,14,15 means "the last four CPUs" on a 16-core system)
 # ZEEK_PIN_CPUS_OTHER_AUTO - automatically pin CPUs for manager, loggers, and proxies if possible (default false)
@@ -156,7 +157,7 @@ fi
 [[ -n "$ZEEK_INTEL_PATH" ]] && INTEL_DIR="$ZEEK_INTEL_PATH" || INTEL_DIR=/opt/sensor/sensor_ctl/zeek/intel
 export INTEL_DIR
 mkdir -p "$INTEL_DIR"/STIX "$INTEL_DIR"/MISP "$INTEL_DIR"/Mandiant
-touch "$INTEL_DIR"/__load__.zeek 2>/dev/null || true
+[[ ! -f "$INTEL_DIR"/__load__.zeek ]] && ( touch "$INTEL_DIR"/__load__.zeek 2>/dev/null || true )
 # autoconfigure load directives for intel files
 [[ -x "$ZEEK_INSTALL_PATH"/bin/zeek_intel_setup.sh ]] && \
   [[ "$ZEEK_INTEL_REFRESH_ON_DEPLOY" == "true" ]] && \
@@ -167,7 +168,7 @@ INTEL_UPDATE_TIME_PREV=0
 [[ -n "$ZEEK_CUSTOM_PATH" ]] && CUSTOM_DIR="$ZEEK_CUSTOM_PATH" || CUSTOM_DIR=/opt/sensor/sensor_ctl/zeek/custom
 export CUSTOM_DIR
 mkdir -p "$CUSTOM_DIR"
-touch "$CUSTOM_DIR"/__load__.zeek 2>/dev/null || true
+[[ ! -f "$CUSTOM_DIR"/__load__.zeek ]] && ( touch "$CUSTOM_DIR"/__load__.zeek 2>/dev/null || true )
 
 # configure zeek cfg files
 pushd "$ZEEK_INSTALL_PATH"/etc >/dev/null 2>&1
@@ -217,7 +218,13 @@ else
   sed -r -i '/InterfacePrefix[[:space:]]*=[[:space:]]*af_packet/d'  ./zeekctl.cfg
 fi
 
-
+if [[ -n "$ZEEK_METRICS_PORT" ]]; then
+  if grep --quiet ^MetricsPort ./zeekctl.cfg; then
+    sed -r -i "s/(MetricsPort)\s*=\s*.*/\1 = $ZEEK_METRICS_PORT/" ./zeekctl.cfg
+  else
+    echo "MetricsPort = $ZEEK_METRICS_PORT" >> ./zeekctl.cfg
+  fi
+fi
 
 # completely rewrite node.cfg for one worker per interface
 # see idaholab/Malcolm#36 for details on fine-tuning
@@ -344,6 +351,14 @@ popd >/dev/null 2>&1
 
 pushd "$ZEEK_LOG_PATH" >/dev/null 2>&1
 
+function zeek_procs_running {
+  if output=$("$ZEEK_CTL" status 2>/dev/null) && [[ -n "$output" ]]; then
+    echo "$output" | tail -n +2 | grep -P "localhost\s+running\s+\d+" | wc -l
+  else
+    pidof zeek 2>/dev/null | wc -w
+  fi
+}
+
 function finish {
   echo "Stopping via \"$ZEEK_CTL\"" >&2
   "$ZEEK_CTL" stop
@@ -355,14 +370,15 @@ trap finish EXIT
 echo "Running via \"$ZEEK_CTL\" ($ZEEK_PROCS processes) ..." >&2
 "$ZEEK_CTL" deploy
 
-for (( i=1; i <= 10; i++)); do sleep 1; done
+for (( i=1; i <= 30; i++)); do sleep 1; done
 
 # keep track of intel updates in order to reload when they occur
 INTEL_UPDATE_TIME="$(stat -c %Y "$INTEL_DIR"/__load__.zeek 2>/dev/null || echo '0')"
 INTEL_UPDATE_TIME_PREV="$INTEL_UPDATE_TIME"
 
 # wait until interrupted (or somehow if zeek dies on its own)
-while [ $("$ZEEK_CTL" status | tail -n +2 | grep -P "localhost\s+running\s+\d+" | wc -l) -ge $ZEEK_PROCS ]; do
+while :; do
+  (( $(zeek_procs_running) >= ZEEK_PROCS )) || break
 
   # check to see if intel feeds were updated, and if so, restart
   INTEL_UPDATE_TIME="$(stat -c %Y "$INTEL_DIR"/__load__.zeek 2>/dev/null || echo '0')"
@@ -372,7 +388,7 @@ while [ $("$ZEEK_CTL" status | tail -n +2 | grep -P "localhost\s+running\s+\d+" 
     INTEL_UPDATE_TIME_PREV="$INTEL_UPDATE_TIME"
   fi
 
-  for (( i=1; i <= 10; i++)); do sleep 1; done
+  for (( i=1; i <= 30; i++)); do sleep 1; done
 done
 
 popd >/dev/null 2>&1
